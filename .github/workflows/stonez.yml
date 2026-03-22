@@ -1,25 +1,19 @@
-name: Stonez Daily Scan
-
+name: Stonez Daily Scan (free)
 on:
   schedule:
-    # Runs after your Mac pushes fresh data (9:20 AM and 3:25 PM IST)
-    - cron: "55 3 * * 1-5"   # 9:25 AM IST  (10 min after Mac fetch)
+    - cron: "50 3 * * 1-5"   # 9:20 AM IST
     - cron: "55 9 * * 1-5"   # 3:25 PM IST
-  workflow_dispatch:         # manual trigger anytime
-
+  workflow_dispatch:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
+        with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - name: Run Stonez scan
+      - name: Run scan
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
