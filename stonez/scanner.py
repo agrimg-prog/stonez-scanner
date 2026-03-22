@@ -1,19 +1,32 @@
 """
-scanner.py — Stonez logic on free Yahoo Finance data + India VIX.
-Completely honest about what's estimated vs real.
+scanner.py — Stonez signal scanner.
+
+What this does accurately (real free data):
+  - NIFTY spot, daily + hourly OHLC from Yahoo Finance
+  - RSI (daily + hourly), 20 SMA, price action patterns
+  - India VIX for market context
+  - Stonez trigger detection (RSI extremes + patterns)
+
+What this does NOT do (requires paid API):
+  - Option chain lookup with real LTP
+  - Actual premium verification
+
+When a trigger fires, the alert tells you exactly which
+strike range to check on Zerodha, and what to look for.
+You verify the actual premium in 30 seconds on Zerodha.
 """
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 import pandas as pd
 import numpy as np
+import calendar
 
 from stonez.market_data import (
-    get_nifty_spot, get_india_vix, get_nifty_ohlc,
-    find_stonez_strikes, get_stonez_expiry, bs_price
+    get_nifty_spot, get_india_vix, get_nifty_ohlc, get_stonez_expiry
 )
 
 log = logging.getLogger(__name__)
@@ -29,38 +42,34 @@ class SignalStrength(str, Enum):
 class Trigger:
     timestamp:        str
     side:             str
-    symbol:           str
-    strike:           float
-    expiry:           str
-    estimated_premium: float       # from Black-Scholes with real VIX
-    sl_price:         float
-    target_price:     float
+    expiry_date:      date
+    expiry_str:       str
+    dte:              int
     signal_strength:  SignalStrength
     rsi_daily:        float
     rsi_hourly:       float
     price_pattern:    str
     spot_level:       float
+    sma_20:           float
     india_vix:        float
-    risk_per_lot:     float
-    dte:              int
-    reasoning:        str
-    data_note:        str = "⚠️ Premium estimated via Black-Scholes with real India VIX. Verify on Zerodha before entering."
+    trend:            str
+    condition:        str
+    # What to do on Zerodha
+    zerodha_action:   str
+    zerodha_strikes:  str   # human-readable range
 
 
 @dataclass
 class WatchItem:
-    side:              str
-    rsi_daily:         float
-    rsi_hourly:        float
-    message:           str
-    spot:              float
-    india_vix:         float
-    symbol:            str   = ""
-    strike:            float = 0.0
-    expiry:            str   = ""
-    estimated_premium: float = 0.0
-    sl_price:          float = 0.0
-    target_price:      float = 0.0
+    side:          str
+    rsi_daily:     float
+    rsi_hourly:    float
+    message:       str
+    spot:          float
+    india_vix:     float
+    expiry_str:    str
+    dte:           int
+    zerodha_hint:  str
 
 
 @dataclass
@@ -86,40 +95,39 @@ class StonezScanner:
     BULLISH = {"dragonfly_doji", "bullish_engulfing", "hammer"}
     BEARISH = {"gravestone_doji", "bearish_engulfing", "shooting_star"}
 
-    def _prange(self, vix: float) -> tuple:
-        """Premium range scales with VIX — more accurate than before."""
-        if vix >= 22: return 80, 160
-        if vix >= 18: return 65, 130
-        return 60, 110
-
     def run_full_scan(self) -> ScanResult:
         scan_time = datetime.now().isoformat()
         triggers  = []
         watchlist = []
 
         try:
-            ctx = self.get_market_context()
-            rsi_d = ctx["rsi_daily"]
-            rsi_h = ctx["rsi_hourly"]
-            vix   = ctx["india_vix"]
+            ctx      = self.get_market_context()
+            rsi_d    = ctx["rsi_daily"]
+            rsi_h    = ctx["rsi_hourly"]
             exp, dte = get_stonez_expiry()
-            exp_str  = exp.strftime("%d-%b-%Y").upper()
 
             if dte < self.MIN_DTE:
-                log.warning(f"Expiry too close ({dte} days). Scanner will skip.")
+                log.warning(f"Expiry too close ({dte}d). No new trades.")
+                return ScanResult(scan_time=scan_time,
+                                  market_context={k:v for k,v in ctx.items() if k!="spot_df"},
+                                  summary=f"Expiry too close ({dte}d). Wait for next month.")
 
+            exp_str = exp.strftime("%d%b%Y").upper()
+
+            # CALL side
             if rsi_d <= self.RSI_OS_MODERATE or rsi_h <= self.RSI_OS_MODERATE:
-                t = self._make_trigger("CALL", ctx, vix, exp_str, dte)
+                t = self._make_trigger("CALL", ctx, exp, exp_str, dte)
                 if t: triggers.append(t)
             elif rsi_d <= self.RSI_OS_WATCH:
-                w = self._make_watch("CALL", ctx, vix, exp_str, dte)
+                w = self._make_watch("CALL", ctx, exp_str, dte)
                 if w: watchlist.append(w)
 
+            # PUT side
             if rsi_d >= self.RSI_OB_MODERATE or rsi_h >= self.RSI_OB_MODERATE:
-                t = self._make_trigger("PUT", ctx, vix, exp_str, dte)
+                t = self._make_trigger("PUT", ctx, exp, exp_str, dte)
                 if t: triggers.append(t)
             elif rsi_d >= self.RSI_OB_WATCH:
-                w = self._make_watch("PUT", ctx, vix, exp_str, dte)
+                w = self._make_watch("PUT", ctx, exp_str, dte)
                 if w: watchlist.append(w)
 
         except Exception as e:
@@ -133,90 +141,83 @@ class StonezScanner:
             summary=self._summary(triggers, watchlist, ctx),
         )
 
-    def _make_trigger(self, side, ctx, vix, exp_str, dte) -> Optional[Trigger]:
-        if dte < self.MIN_DTE:
-            return None
-
+    def _make_trigger(self, side, ctx, exp, exp_str, dte) -> Optional[Trigger]:
         spot    = ctx["spot"]
-        p_min, p_max = self._prange(vix)
-        strikes = find_stonez_strikes(spot, vix, dte, side, p_min, p_max)
-
-        if not strikes:
-            log.info(f"No strikes found in ₹{p_min}–{p_max} range for {side} | VIX={vix:.1f}% | DTE={dte}")
-            return None
-
-        best  = strikes[0]
-        prem  = best["estimated_premium"]
-        sl    = max(round(prem - 32, 1), round(prem * 0.62, 1))
-        sym   = f"NIFTY{exp_str.replace('-','')}{int(best['strike'])}{'CE' if side=='CALL' else 'PE'}"
-
-        pattern   = self._pattern(ctx.get("spot_df"))
+        vix     = ctx["india_vix"]
+        pattern = self._pattern(ctx.get("spot_df"))
         above_sma = (spot < ctx["sma_20"]) if side=="CALL" else (spot > ctx["sma_20"])
         strength  = self._score(side, ctx["rsi_daily"], ctx["rsi_hourly"], pattern, above_sma)
 
         if strength == SignalStrength.NO_TRADE:
             return None
 
+        # Tell user what to look for on Zerodha — real guidance, not fake prices
+        if side == "CALL":
+            # OTM calls: strikes above spot
+            # With VIX 22%+ and DTE ~39, the ₹70-100 range is typically 2000-3000 pts OTM
+            # But this varies — we tell user to check a range
+            approx_low  = round((spot + 1500) / 50) * 50
+            approx_high = round((spot + 3500) / 50) * 50
+            action = (
+                f"Open Zerodha → NIFTY Options → {exp_str} expiry → "
+                f"Calls tab → Find a CALL strike between "
+                f"{int(approx_low):,} and {int(approx_high):,} "
+                f"priced between ₹70 and ₹100. That is your Stonez entry."
+            )
+            strikes_hint = f"{int(approx_low):,}–{int(approx_high):,} CE (approx)"
+        else:
+            # OTM puts: strikes below spot
+            approx_low  = round((spot - 3500) / 50) * 50
+            approx_high = round((spot - 1500) / 50) * 50
+            action = (
+                f"Open Zerodha → NIFTY Options → {exp_str} expiry → "
+                f"Puts tab → Find a PUT strike between "
+                f"{int(approx_low):,} and {int(approx_high):,} "
+                f"priced between ₹70 and ₹100. That is your Stonez entry."
+            )
+            strikes_hint = f"{int(approx_low):,}–{int(approx_high):,} PE (approx)"
+
         return Trigger(
-            timestamp         = datetime.now().isoformat(),
-            side              = side,
-            symbol            = sym,
-            strike            = best["strike"],
-            expiry            = exp_str,
-            estimated_premium = prem,
-            sl_price          = sl,
-            target_price      = round(prem * 2.0, 1),
-            signal_strength   = strength,
-            rsi_daily         = round(ctx["rsi_daily"], 1),
-            rsi_hourly        = round(ctx["rsi_hourly"], 1),
-            price_pattern     = pattern,
-            spot_level        = spot,
-            india_vix         = round(vix, 2),
-            risk_per_lot      = round((prem - sl) * 75, 0),
-            dte               = dte,
-            reasoning         = (
-                f"{'Oversold' if side=='CALL' else 'Overbought'} | "
-                f"Daily RSI {ctx['rsi_daily']} | Hourly RSI {ctx['rsi_hourly']} | "
-                f"Pattern: {pattern.replace('_',' ').title()} | "
-                f"India VIX: {vix:.1f}% | DTE: {dte}d | "
-                f"Moneyness: {best['moneyness']:+.1f}% OTM"
-            ),
+            timestamp       = datetime.now().isoformat(),
+            side            = side,
+            expiry_date     = exp,
+            expiry_str      = exp_str,
+            dte             = dte,
+            signal_strength = strength,
+            rsi_daily       = round(ctx["rsi_daily"], 1),
+            rsi_hourly      = round(ctx["rsi_hourly"], 1),
+            price_pattern   = pattern,
+            spot_level      = spot,
+            sma_20          = ctx["sma_20"],
+            india_vix       = round(vix, 2),
+            trend           = ctx["trend"],
+            condition       = ctx["condition"],
+            zerodha_action  = action,
+            zerodha_strikes = strikes_hint,
         )
 
-    def _make_watch(self, side, ctx, vix, exp_str, dte) -> Optional[WatchItem]:
-        if dte < self.MIN_DTE:
-            return None
-
-        spot    = ctx["spot"]
-        p_min, p_max = self._prange(vix)
-        strikes = find_stonez_strikes(spot, vix, dte, side, p_min, p_max)
-
+    def _make_watch(self, side, ctx, exp_str, dte) -> Optional[WatchItem]:
+        spot = ctx["spot"]
+        vix  = ctx["india_vix"]
         rsi_d, rsi_h = ctx["rsi_daily"], ctx["rsi_hourly"]
-        msg = (
-            f"Daily RSI {rsi_d:.1f} approaching oversold (trigger ≤{self.RSI_OS_MODERATE}). "
-            f"Watch for hammer or bullish engulfing candle on daily chart."
-            if side == "CALL" else
-            f"Daily RSI {rsi_d:.1f} approaching overbought (trigger ≥{self.RSI_OB_MODERATE}). "
-            f"Watch for shooting star or bearish engulfing candle on daily chart."
-        )
 
-        w = WatchItem(side=side, rsi_daily=round(rsi_d,1),
-                      rsi_hourly=round(rsi_h,1), message=msg,
-                      spot=spot, india_vix=round(vix,2))
+        if side == "CALL":
+            msg = (f"Daily RSI {rsi_d:.1f} approaching oversold (trigger ≤{self.RSI_OS_MODERATE}). "
+                   f"Watch for hammer or bullish engulfing on daily chart. "
+                   f"Prepare to check OTM calls on Zerodha when it triggers.")
+            approx_low  = round((spot + 1500) / 50) * 50
+            approx_high = round((spot + 3500) / 50) * 50
+            hint = f"When triggered, check {exp_str} CALL strikes {int(approx_low):,}–{int(approx_high):,} for ₹70–100 premium"
+        else:
+            msg = (f"Daily RSI {rsi_d:.1f} approaching overbought (trigger ≥{self.RSI_OB_MODERATE}). "
+                   f"Watch for shooting star or bearish engulfing on daily chart.")
+            approx_low  = round((spot - 3500) / 50) * 50
+            approx_high = round((spot - 1500) / 50) * 50
+            hint = f"When triggered, check {exp_str} PUT strikes {int(approx_low):,}–{int(approx_high):,} for ₹70–100 premium"
 
-        if strikes:
-            best = strikes[0]
-            prem = best["estimated_premium"]
-            sl   = max(round(prem-32,1), round(prem*0.62,1))
-            sym  = f"NIFTY{exp_str.replace('-','')}{int(best['strike'])}{'CE' if side=='CALL' else 'PE'}"
-            w.symbol            = sym
-            w.strike            = best["strike"]
-            w.expiry            = exp_str
-            w.estimated_premium = prem
-            w.sl_price          = sl
-            w.target_price      = round(prem * 2.0, 1)
-
-        return w
+        return WatchItem(side=side, rsi_daily=round(rsi_d,1), rsi_hourly=round(rsi_h,1),
+                         message=msg, spot=spot, india_vix=round(vix,2),
+                         expiry_str=exp_str, dte=dte, zerodha_hint=hint)
 
     def get_market_context(self) -> dict:
         spot      = get_nifty_spot()
@@ -244,14 +245,15 @@ class StonezScanner:
             "sma_20":     round(sma_d, 1),
             "condition":  cond,
             "trend":      "bullish" if spot > sma_d else "bearish",
-            "data_source": "yahoo_finance_free",
+            "data_source": "yahoo_finance_real",
             "scan_time":  datetime.now().strftime("%d-%b-%Y %I:%M %p IST"),
             "spot_df":    daily_df,
         }
 
     def _rsi(self, df, p=14) -> float:
         if df is None or df.empty or len(df)<p+1: return 50.0
-        d=df["close"].diff(); g=d.clip(lower=0).ewm(com=p-1,min_periods=p).mean()
+        d=df["close"].diff()
+        g=d.clip(lower=0).ewm(com=p-1,min_periods=p).mean()
         l=(-d.clip(upper=0)).ewm(com=p-1,min_periods=p).mean()
         rs=g/l.replace(0,float("nan"))
         return float((100-100/(1+rs)).iloc[-1])
@@ -264,7 +266,8 @@ class StonezScanner:
     def _pattern(self, df) -> str:
         if df is None or len(df)<3: return "none"
         r=df.iloc[-1]; p=df.iloc[-2]
-        o,h,l,c=r["open"],r["high"],r["low"],r["close"]; po,pc=p["open"],p["close"]
+        o,h,l,c=r["open"],r["high"],r["low"],r["close"]
+        po,pc=p["open"],p["close"]
         b=abs(c-o); rng=h-l
         if rng==0: return "none"
         if b/rng<.10 and (h-max(o,c))/rng>.60: return "gravestone_doji"
@@ -291,7 +294,7 @@ class StonezScanner:
 
     def _summary(self, triggers, watchlist, ctx) -> str:
         base=(f"NIFTY {ctx.get('spot',0):.0f} | RSI {ctx.get('rsi_daily',0)} | "
-              f"VIX {ctx.get('india_vix',0)} | {ctx.get('condition','').upper().replace('_',' ')}")
+              f"VIX {ctx.get('india_vix',0)}% | {ctx.get('condition','').upper().replace('_',' ')}")
         if triggers:
             s=sum(1 for t in triggers if t.signal_strength==SignalStrength.STRONG)
             return f"{len(triggers)} trigger(s): {s} STRONG | {base}"

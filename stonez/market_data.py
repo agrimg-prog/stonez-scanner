@@ -1,11 +1,15 @@
 """
 market_data.py — 100% free, no signup, no API key.
+Uses Yahoo Finance direct HTTP for:
+  - NIFTY 50 spot price
+  - NIFTY daily + hourly OHLC (for RSI, SMA, patterns)
+  - India VIX (real volatility index — makes BS estimates accurate)
+  - Option premium estimates via Black-Scholes with real VIX as IV
 
-Key fix: Stonez options are always OTM.
-  CALL → strikes strictly ABOVE spot
-  PUT  → strikes strictly BELOW spot
-
-BS formula uses real India VIX for time value.
+No option chain API exists for free from cloud IPs.
+Premium shown is estimated — always verify on Zerodha before entering.
+India VIX currently reflects actual market volatility, so estimates
+are meaningful (not hardcoded guesses).
 """
 
 import logging
@@ -24,6 +28,7 @@ HDR = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 
 
 def _yf_get(symbol: str, interval: str, range_str: str) -> dict | None:
+    """Fetch from Yahoo Finance, try both endpoints."""
     for base in [YF1, YF2]:
         try:
             r = requests.get(f"{base}/{symbol}", headers=HDR,
@@ -39,6 +44,7 @@ def _yf_get(symbol: str, interval: str, range_str: str) -> dict | None:
 
 
 def get_nifty_spot() -> float:
+    """Real NIFTY 50 spot price."""
     for sym in ["^NSEI", "NIFTY50.NS"]:
         r = _yf_get(sym, "1m", "1d")
         if r:
@@ -53,28 +59,35 @@ def get_nifty_spot() -> float:
 def get_india_vix() -> float:
     """
     Real India VIX from Yahoo Finance (^INDIAVIX).
-    Returned as percentage e.g. 22.81 means 22.81% annualised vol.
+    India VIX is NSE's official volatility index — represents
+    expected 30-day annualised volatility of NIFTY 50.
+    This is what makes our Black-Scholes estimates meaningful.
     """
-    for range_str in ["5d", "30d"]:
-        r = _yf_get("^INDIAVIX", "1d", range_str)
-        if r:
-            # Try live price first
-            p = r.get("meta", {}).get("regularMarketPrice")
-            if p and 5 < p < 100:
-                log.info(f"India VIX: {p:.2f}%")
-                return float(p)
-            # Fall back to last close in OHLC
-            closes = r.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-            closes = [c for c in closes if c and 5 < c < 100]
-            if closes:
-                log.info(f"India VIX (close): {closes[-1]:.2f}%")
-                return float(closes[-1])
-
-    log.warning("Could not fetch India VIX — using 18% (elevated default)")
-    return 18.0
+    r = _yf_get("^INDIAVIX", "1d", "5d")
+    if r:
+        p = r.get("meta", {}).get("regularMarketPrice")
+        if p and p > 0:
+            vix = float(p)
+            log.info(f"India VIX: {vix:.2f}%")
+            return vix
+    # Fallback: use recent historical VIX from OHLC
+    r = _yf_get("^INDIAVIX", "1d", "30d")
+    if r:
+        closes = r.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        closes = [c for c in closes if c]
+        if closes:
+            vix = float(closes[-1])
+            log.info(f"India VIX (historical): {vix:.2f}%")
+            return vix
+    log.warning("Could not fetch India VIX, using 16% default")
+    return 16.0
 
 
 def get_nifty_ohlc(interval: str = "1d", days: int = 60) -> pd.DataFrame:
+    """
+    NIFTY OHLC data from Yahoo Finance.
+    interval: '1d' | '60m'
+    """
     yf_range = "3mo" if days > 60 else f"{days}d"
     for sym in ["^NSEI", "NIFTY50.NS"]:
         r = _yf_get(sym, interval, yf_range)
@@ -97,33 +110,38 @@ def get_nifty_ohlc(interval: str = "1d", days: int = 60) -> pd.DataFrame:
                 })
             if rows:
                 df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
-                log.info(f"OHLC {sym} {interval}: {len(df)} rows, latest={df['close'].iloc[-1]:.1f}")
+                log.info(f"OHLC {sym} {interval}: {len(df)} rows, "
+                         f"latest={df['close'].iloc[-1]:.1f}")
                 return df
         except Exception as e:
             log.warning(f"OHLC parse {sym}: {e}")
     return pd.DataFrame()
 
 
-# ── Black-Scholes ─────────────────────────────────────────────────────────────
+# ── Black-Scholes option pricing ──────────────────────────────────────────────
 
 def _ncdf(x: float) -> float:
+    """Standard normal CDF."""
     return 0.5 * (1.0 + erf(x / sqrt(2)))
 
 
 def bs_price(spot: float, strike: float, dte: int,
              iv_pct: float, option_type: str) -> float:
     """
-    Black-Scholes price for European option.
-    iv_pct: India VIX value e.g. 22.81 (NOT 0.2281)
-    Returns estimated option premium in ₹.
+    Black-Scholes option price.
+    spot:        NIFTY spot
+    strike:      option strike
+    dte:         days to expiry
+    iv_pct:      implied volatility in % (e.g. 15.5 for 15.5%)
+    option_type: 'CE' or 'PE'
+    Returns:     estimated option premium in ₹
     """
-    if spot <= 0 or strike <= 0 or dte < 1:
-        intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
-        return max(0.05, round(intrinsic, 1))
+    T     = max(dte, 1) / 365.0
+    sigma = iv_pct / 100.0
+    r     = 0.065  # approximate Indian risk-free rate
 
-    T     = dte / 365.0
-    sigma = iv_pct / 100.0      # e.g. 22.81 → 0.2281
-    r     = 0.065               # approx Indian risk-free rate
+    if spot <= 0 or strike <= 0 or sigma <= 0:
+        return max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
 
     try:
         d1 = (log(spot / strike) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
@@ -136,103 +154,55 @@ def bs_price(spot: float, strike: float, dte: int,
             price = (strike * exp(-r * T) * _ncdf(-d2) -
                      spot * _ncdf(-d1))
 
-        result = max(0.05, round(price, 1))
-        log.debug(f"BS: spot={spot:.0f} K={strike:.0f} DTE={dte} "
-                  f"IV={iv_pct:.1f}% → {option_type} = ₹{result}")
-        return result
-
+        return max(0.05, round(price, 1))
     except Exception as e:
-        log.warning(f"BS error (spot={spot}, K={strike}, IV={iv_pct}): {e}")
-        intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
-        return max(0.05, round(intrinsic, 1))
+        log.warning(f"BS price error: {e}")
+        intrinsic = max(0, spot - strike) if option_type == "CE" else max(0, strike - spot)
+        return max(0.05, intrinsic)
 
 
 def find_stonez_strikes(spot: float, vix: float, dte: int,
                          side: str, p_min: float, p_max: float) -> list:
     """
-    Scan OTM strikes to find ones where BS premium is in Stonez range.
-
-    CRITICAL FIX:
-      CALL → only strikes ABOVE spot (OTM calls)
-      PUT  → only strikes BELOW spot (OTM puts)
-
-    ITM options are NEVER valid Stonez trades — their premiums are
-    dominated by intrinsic value, not the time value we want to ride.
-
-    Returns list of candidates sorted closest-to-spot first.
+    Scan strikes to find ones where BS-estimated premium is in Stonez range.
+    Returns list of {strike, estimated_premium} sorted by how close to midpoint.
     """
     opt_type = "CE" if side == "CALL" else "PE"
     results  = []
-    step     = 50
 
-    # Validate inputs
-    if spot <= 0 or vix <= 0 or dte < 1:
-        log.error(f"Invalid inputs: spot={spot}, vix={vix}, dte={dte}")
-        return []
+    # Search strikes in steps of 50 from -5000 to +5000 of spot
+    step   = 50
+    spread = 6000
 
-    # Log what we're scanning
-    log.info(f"Scanning OTM {side}s | spot={spot:.0f} | VIX={vix:.2f}% | "
-             f"DTE={dte} | range ₹{p_min}–₹{p_max}")
-
-    if side == "CALL":
-        # OTM calls: strikes ABOVE spot
-        # Start 50 pts above spot, scan up to +8000 pts
-        start_strike = round(spot / step) * step + step   # first OTM strike above spot
-        for strike in range(int(start_strike), int(start_strike) + 8001, step):
-            prem = bs_price(spot, float(strike), dte, vix, "CE")
-
-            if prem > p_max:
-                # Still too expensive — keep going higher (further OTM = cheaper)
-                continue
-            if prem < p_min:
-                # Gone too far OTM — premiums only get cheaper from here
-                break
-            # In range
-            results.append({
-                "strike":             float(strike),
-                "estimated_premium":  prem,
-                "distance_from_spot": strike - spot,
-                "moneyness_pct":      round((strike - spot) / spot * 100, 2),
-                "type":               "OTM_CE",
-            })
-
-    else:  # PUT
-        # OTM puts: strikes BELOW spot
-        # Start 50 pts below spot, scan down to -8000 pts
-        start_strike = round(spot / step) * step - step   # first OTM strike below spot
-        for strike in range(int(start_strike), int(start_strike) - 8001, -step):
+    for delta in range(0, spread + 1, step):
+        for direction in ([1, -1] if side == "CALL" else [-1, 1]):
+            strike = round((spot + direction * delta) / step) * step
             if strike <= 0:
-                break
-            prem = bs_price(spot, float(strike), dte, vix, "PE")
-
-            if prem > p_max:
                 continue
-            if prem < p_min:
-                break
-            results.append({
-                "strike":             float(strike),
-                "estimated_premium":  prem,
-                "distance_from_spot": spot - strike,
-                "moneyness_pct":      round((spot - strike) / spot * 100, 2),
-                "type":               "OTM_PE",
-            })
 
-    if results:
-        # Sort closest to spot first (least OTM = highest delta = most responsive)
-        results.sort(key=lambda x: x["distance_from_spot"])
-        log.info(f"Found {len(results)} OTM {side} strike(s) in range:")
-        for r in results[:3]:
-            log.info(f"  Strike {r['strike']:.0f} | "
-                     f"Est. ₹{r['estimated_premium']} | "
-                     f"{r['moneyness_pct']:+.1f}% OTM")
-    else:
-        log.warning(f"No OTM {side} strikes found in ₹{p_min}–₹{p_max} range. "
-                    f"VIX={vix:.1f}%, DTE={dte}. Market may be in extreme condition.")
+            prem = bs_price(spot, strike, dte, vix, opt_type)
 
-    return results[:5]
+            if p_min <= prem <= p_max:
+                results.append({
+                    "strike":             strike,
+                    "estimated_premium":  prem,
+                    "distance_from_spot": abs(strike - spot),
+                    "moneyness":          round((strike - spot) / spot * 100, 2),
+                })
+
+    # Remove duplicates, sort by distance from spot midpoint of range
+    seen = set()
+    unique = []
+    for r in results:
+        if r["strike"] not in seen:
+            seen.add(r["strike"])
+            unique.append(r)
+
+    unique.sort(key=lambda x: x["distance_from_spot"])
+    return unique[:5]   # top 5 candidates
 
 
-def get_stonez_expiry() -> tuple:
+def get_stonez_expiry() -> tuple[date, int]:
     """
     Returns (expiry_date, dte) per Stonez rule:
     Before 10th → current month last Thursday
@@ -254,6 +224,4 @@ def get_stonez_expiry() -> tuple:
         exp = last_thu(y, m)
 
     dte = max(1, (exp - today).days)
-    log.info(f"Stonez expiry: {exp} (DTE={dte}, "
-             f"rule={'current month' if today.day<=10 else 'next month'})")
     return exp, dte
