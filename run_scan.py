@@ -1,5 +1,5 @@
 """
-run_scan.py — entry point. Handles triggers, watchlist, and no-trade.
+run_scan.py — GitHub Actions entry point. Reads option_data.json, runs analysis, sends Telegram.
 """
 
 import os, sys, logging
@@ -25,40 +25,35 @@ def main():
     current_state = load_state()
     trade_active  = current_state.status in ("ACTIVE", "WATCHING")
 
-    log.info(f"Summary: {result.summary} | Existing trade: {current_state.status}")
+    log.info(f"Summary: {result.summary} | Trade state: {current_state.status}")
 
     if result.triggers:
         best = sorted(result.triggers,
                       key=lambda t: (t.signal_strength == SignalStrength.STRONG, -t.risk_per_lot),
                       reverse=True)[0]
-
         for t in result.triggers:
-            log.info(f"  TRIGGER [{t.signal_strength.value}] {t.side} | "
-                     f"{t.symbol} | Entry Rs{t.entry_price} | SL Rs{t.sl_price} | "
-                     f"Target Rs{t.target_price} | DTE {t.dte}d")
+            log.info(f"  [{t.signal_strength.value}] {t.side} {t.symbol} "
+                     f"| Entry ₹{t.entry_price} | SL ₹{t.sl_price} | Target ₹{t.target_price} | IV {t.iv}%")
             send_telegram(format_trigger(t))
 
         if not trade_active:
             set_watching(best)
-            log.info(f"Trade state WATCHING: {best.symbol}")
             send_telegram(
-                f"Saved for SL monitoring.\n"
-                f"Symbol: {best.symbol}\n"
-                f"SL monitor tracks Rs{best.sl_price} SL and Rs{best.target_price} target "
-                f"every 30 min once you enter on Zerodha."
+                f"📌 <b>Trade saved for SL monitoring</b>\n"
+                f"Symbol: <code>{best.symbol}</code>\n"
+                f"SL monitor tracks ₹{best.sl_price} SL and ₹{best.target_price} target every 30 min.\n"
+                f"Buy on Zerodha first, then trigger the SL Monitor workflow."
             )
-        else:
-            log.info(f"Existing trade {current_state.symbol} active - not overwriting.")
 
     elif result.watchlist:
         log.info(f"  WATCHLIST: {len(result.watchlist)} item(s)")
         send_telegram(format_watchlist(result.watchlist, ctx))
 
     else:
-        log.info(f"  No triggers. RSI={ctx.get('rsi_daily')} | {ctx.get('condition')}")
+        log.info(f"  No setup. RSI={ctx.get('rsi_daily')} | {ctx.get('condition')}")
         send_telegram(format_no_trigger(ctx))
 
-    log.info("=== Stonez scan complete ===")
+    log.info("=== Scan complete ===")
 
 
 if __name__ == "__main__":

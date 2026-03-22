@@ -5,12 +5,14 @@ trade_state.py — persists active trade to trade_state.json in the repo.
 import json, logging
 from datetime import datetime
 from dataclasses import dataclass, asdict
-from typing import Optional
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 STATE_FILE = Path(__file__).parent.parent / "trade_state.json"
 
+FIELDS = ["status","side","symbol","strike","expiry","entry_price","sl_price",
+          "target_price","spot_at_entry","rsi_at_entry","pattern","entered_at",
+          "last_checked","exit_price","exit_reason","exited_at","pnl_pts","pnl_rs"]
 
 @dataclass
 class TradeState:
@@ -40,9 +42,9 @@ def load_state() -> TradeState:
     try:
         with open(STATE_FILE) as f:
             data = json.load(f)
-        return TradeState(**{k: v for k, v in data.items() if k in TradeState.__dataclass_fields__})
+        return TradeState(**{k: v for k, v in data.items() if k in FIELDS})
     except Exception as e:
-        log.warning(f"Could not load trade state: {e}")
+        log.warning(f"Load state error: {e}")
         return TradeState()
 
 
@@ -50,26 +52,20 @@ def save_state(state: TradeState):
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(asdict(state), f, indent=2)
-        log.info(f"Trade state saved: {state.status} | {state.symbol}")
     except Exception as e:
-        log.error(f"Could not save trade state: {e}")
+        log.error(f"Save state error: {e}")
 
 
 def set_watching(trigger) -> TradeState:
     state = TradeState(
-        status        = "WATCHING",
-        side          = trigger.side,
-        symbol        = trigger.symbol,
-        strike        = trigger.strike,
-        expiry        = trigger.expiry,
-        entry_price   = trigger.entry_price,
-        sl_price      = trigger.sl_price,
-        target_price  = trigger.target_price,
-        spot_at_entry = trigger.spot_level,
-        rsi_at_entry  = trigger.rsi_daily,
-        pattern       = trigger.price_pattern,
-        entered_at    = datetime.now().isoformat(),
-        last_checked  = datetime.now().isoformat(),
+        status="WATCHING", side=trigger.side,
+        symbol=trigger.symbol, strike=trigger.strike,
+        expiry=trigger.expiry, entry_price=trigger.entry_price,
+        sl_price=trigger.sl_price, target_price=trigger.target_price,
+        spot_at_entry=trigger.spot_level, rsi_at_entry=trigger.rsi_daily,
+        pattern=trigger.price_pattern,
+        entered_at=datetime.now().isoformat(),
+        last_checked=datetime.now().isoformat(),
     )
     save_state(state)
     return state

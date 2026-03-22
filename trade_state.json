@@ -1,20 +1,7 @@
 {
-  "status": "NONE",
-  "side": "",
-  "symbol": "",
-  "strike": 0.0,
-  "expiry": "",
-  "entry_price": 0.0,
-  "sl_price": 0.0,
-  "target_price": 0.0,
-  "spot_at_entry": 0.0,
-  "rsi_at_entry": 0.0,
-  "pattern": "",
-  "entered_at": "",
-  "last_checked": "",
-  "exit_price": 0.0,
-  "exit_reason": "",
-  "exited_at": "",
-  "pnl_pts": 0.0,
-  "pnl_rs": 0.0
+  "status": "NONE", "side": "", "symbol": "", "strike": 0.0,
+  "expiry": "", "entry_price": 0.0, "sl_price": 0.0, "target_price": 0.0,
+  "spot_at_entry": 0.0, "rsi_at_entry": 0.0, "pattern": "",
+  "entered_at": "", "last_checked": "", "exit_price": 0.0,
+  "exit_reason": "", "exited_at": "", "pnl_pts": 0.0, "pnl_rs": 0.0
 }
