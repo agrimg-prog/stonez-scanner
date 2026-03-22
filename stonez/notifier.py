@@ -1,5 +1,5 @@
 """
-notifier.py — complete version with all formatters.
+notifier.py — all formatters in one place.
 """
 
 import os
@@ -31,16 +31,16 @@ def send_telegram(text: str):
 
 
 def format_trigger(t) -> str:
-    icon = "🟢" if t.side == "CALL" else "🔴"
+    icon          = "🟢" if t.side == "CALL" else "🔴"
     strength_icon = {"STRONG": "🔥", "MODERATE": "⚡"}.get(t.signal_strength.value, "")
     return (
         f"{icon} <b>STONEZ {t.side} TRIGGER</b> {strength_icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Symbol:</b> {t.symbol}\n"
+        f"<b>Symbol:</b> <code>{t.symbol}</code>\n"
         f"<b>Strike:</b> {t.strike:,.0f}  |  <b>Expiry:</b> {t.expiry}\n"
         f"<b>Entry:</b> ₹{t.entry_price}  |  <b>SL:</b> ₹{t.sl_price}  |  <b>Target:</b> ₹{t.target_price}\n"
         f"<b>Risk/lot:</b> ₹{t.risk_per_lot:,.0f}  (lot size 75)\n"
-        f"<b>DTE:</b> {t.dte} days to expiry\n"
+        f"<b>Days to expiry:</b> {t.dte}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Daily RSI:</b> {t.rsi_daily}  |  <b>Hourly RSI:</b> {t.rsi_hourly}\n"
         f"<b>Pattern:</b> {t.price_pattern.replace('_', ' ').title()}\n"
@@ -59,19 +59,31 @@ def format_watchlist(items: list, ctx: dict) -> str:
     ts     = ctx.get("scan_time", "")
 
     lines = [
-        f"👀 <b>Stonez Watchlist Alert</b>",
-        f"━━━━━━━━━━━━━━━━━━━━",
+        "👀 <b>Stonez Watchlist Alert</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
         f"<b>NIFTY:</b> {spot:,.1f}",
         f"<b>Daily RSI:</b> {rsi_d}  |  <b>Hourly RSI:</b> {rsi_h}",
         f"<b>Condition:</b> {cond}",
-        f"━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━",
     ]
+
     for item in items:
-        lines.append(f"<b>{item['side']} side approaching setup zone</b>")
-        lines.append(item["message"])
+        lines.append(f"<b>{item.side} side — approaching setup zone</b>")
+        lines.append(item.message)
+        if item.symbol:
+            lines += [
+                "",
+                f"<b>Option to watch:</b> <code>{item.symbol}</code>",
+                f"<b>Strike:</b> {item.strike:,.0f}  |  <b>Expiry:</b> {item.expiry}",
+                f"<b>Current premium:</b> ₹{item.entry_price}",
+                f"<b>Enter around:</b> ₹{item.entry_price}",
+                f"<b>SL once entered:</b> ₹{item.sl_price}",
+                f"<b>Target:</b> ₹{item.target_price} (2×)",
+            ]
+
     lines += [
-        f"━━━━━━━━━━━━━━━━━━━━",
-        f"No entry yet. Wait for RSI extreme + confirming candle.",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Not triggered yet. Wait for confirming candle before entering.",
         f"<b>Scanned at:</b> {ts}",
     ]
     return "\n".join(lines)
@@ -87,9 +99,7 @@ def format_no_trigger(ctx: dict) -> str:
     src    = ctx.get("data_source", "live")
     ts     = ctx.get("scan_time", "")
 
-    stale_warn = ""
-    if spot == 23500.0:
-        stale_warn = "\n\n⚠️ <b>Data warning:</b> Live fetch failed — values may be stale."
+    stale = "\n\n⚠️ <b>Data warning:</b> Live fetch may have failed." if spot == 23500.0 else ""
 
     return (
         f"📊 <b>Stonez Daily Scan</b>\n"
@@ -102,5 +112,5 @@ def format_no_trigger(ctx: dict) -> str:
         f"<b>Data source:</b> {src}\n"
         f"<b>Scanned at:</b> {ts}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"No valid Stonez setup right now. Watching...{stale_warn}"
+        f"No valid Stonez setup right now. Watching...{stale}"
     )

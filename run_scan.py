@@ -1,6 +1,5 @@
 """
-run_scan.py — Stonez scanner entry point v3.
-Saves trade state on trigger so SL monitor can track it.
+run_scan.py — entry point. Handles triggers, watchlist, and no-trade.
 """
 
 import os, sys, logging
@@ -19,51 +18,45 @@ def main():
     from stonez.trade_state import load_state, set_watching
 
     log.info("=== Stonez scan starting ===")
-    scanner = StonezScanner()
-    result  = scanner.run_full_scan()
-    ctx     = result.market_context
 
-    # Don't overwrite an active/watching trade
+    scanner       = StonezScanner()
+    result        = scanner.run_full_scan()
+    ctx           = result.market_context
     current_state = load_state()
     trade_active  = current_state.status in ("ACTIVE", "WATCHING")
 
     log.info(f"Summary: {result.summary} | Existing trade: {current_state.status}")
 
     if result.triggers:
-        # Pick the strongest trigger
         best = sorted(result.triggers,
-                      key=lambda t: (t.signal_strength == SignalStrength.STRONG, t.risk_per_lot),
+                      key=lambda t: (t.signal_strength == SignalStrength.STRONG, -t.risk_per_lot),
                       reverse=True)[0]
 
         for t in result.triggers:
             log.info(f"  TRIGGER [{t.signal_strength.value}] {t.side} | "
-                     f"{t.symbol} | Entry ₹{t.entry_price} | SL ₹{t.sl_price} | "
-                     f"Target ₹{t.target_price} | DTE {t.dte}d")
-            msg = format_trigger(t)
-            send_telegram(msg)
+                     f"{t.symbol} | Entry Rs{t.entry_price} | SL Rs{t.sl_price} | "
+                     f"Target Rs{t.target_price} | DTE {t.dte}d")
+            send_telegram(format_trigger(t))
 
-        # Save state for SL monitor (only if no active trade already)
         if not trade_active:
             set_watching(best)
-            log.info(f"Trade state set to WATCHING: {best.symbol}")
+            log.info(f"Trade state WATCHING: {best.symbol}")
             send_telegram(
-                f"📌 <b>Trade saved to watchlist</b>\n"
-                f"SL monitor will alert you every 30 min once you enter.\n"
-                f"When you buy on Zerodha, the monitor tracks ₹{best.sl_price} SL "
-                f"and ₹{best.target_price} target automatically."
+                f"Saved for SL monitoring.\n"
+                f"Symbol: {best.symbol}\n"
+                f"SL monitor tracks Rs{best.sl_price} SL and Rs{best.target_price} target "
+                f"every 30 min once you enter on Zerodha."
             )
         else:
-            log.info(f"Existing trade ({current_state.symbol}) active — not overwriting.")
+            log.info(f"Existing trade {current_state.symbol} active - not overwriting.")
 
     elif result.watchlist:
         log.info(f"  WATCHLIST: {len(result.watchlist)} item(s)")
-        msg = format_watchlist(result.watchlist, ctx)
-        send_telegram(msg)
+        send_telegram(format_watchlist(result.watchlist, ctx))
 
     else:
         log.info(f"  No triggers. RSI={ctx.get('rsi_daily')} | {ctx.get('condition')}")
-        msg = format_no_trigger(ctx)
-        send_telegram(msg)
+        send_telegram(format_no_trigger(ctx))
 
     log.info("=== Stonez scan complete ===")
 
