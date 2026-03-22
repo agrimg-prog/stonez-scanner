@@ -1,5 +1,5 @@
 """
-Notifier — sends Stonez alerts via Telegram (free).
+notifier.py — complete version with all formatters.
 """
 
 import os
@@ -40,10 +40,10 @@ def format_trigger(t) -> str:
         f"<b>Strike:</b> {t.strike:,.0f}  |  <b>Expiry:</b> {t.expiry}\n"
         f"<b>Entry:</b> ₹{t.entry_price}  |  <b>SL:</b> ₹{t.sl_price}  |  <b>Target:</b> ₹{t.target_price}\n"
         f"<b>Risk/lot:</b> ₹{t.risk_per_lot:,.0f}  (lot size 75)\n"
+        f"<b>DTE:</b> {t.dte} days to expiry\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Daily RSI:</b> {t.rsi_daily}  |  <b>Hourly RSI:</b> {t.rsi_hourly}\n"
         f"<b>Pattern:</b> {t.price_pattern.replace('_', ' ').title()}\n"
-        f"<b>Option above 20 SMA:</b> {'✅' if t.above_20sma else '❌'}\n"
         f"<b>NIFTY spot:</b> {t.spot_level:,.1f}\n"
         f"<b>Signal:</b> {t.signal_strength.value}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -51,11 +51,37 @@ def format_trigger(t) -> str:
     )
 
 
+def format_watchlist(items: list, ctx: dict) -> str:
+    spot   = ctx.get("spot", 0)
+    rsi_d  = ctx.get("rsi_daily", 0)
+    rsi_h  = ctx.get("rsi_hourly", 0)
+    cond   = ctx.get("condition", "").upper().replace("_", " ")
+    ts     = ctx.get("scan_time", "")
+
+    lines = [
+        f"👀 <b>Stonez Watchlist Alert</b>",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"<b>NIFTY:</b> {spot:,.1f}",
+        f"<b>Daily RSI:</b> {rsi_d}  |  <b>Hourly RSI:</b> {rsi_h}",
+        f"<b>Condition:</b> {cond}",
+        f"━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for item in items:
+        lines.append(f"<b>{item['side']} side approaching setup zone</b>")
+        lines.append(item["message"])
+    lines += [
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"No entry yet. Wait for RSI extreme + confirming candle.",
+        f"<b>Scanned at:</b> {ts}",
+    ]
+    return "\n".join(lines)
+
+
 def format_no_trigger(ctx: dict) -> str:
     spot   = ctx.get("spot", 0)
     rsi_d  = ctx.get("rsi_daily", 0)
     rsi_h  = ctx.get("rsi_hourly", 0)
-    cond   = ctx.get("condition", "").upper()
+    cond   = ctx.get("condition", "").upper().replace("_", " ")
     trend  = ctx.get("trend", "").upper()
     expiry = ctx.get("stonez_expiry", "").replace("_", " ").title()
     src    = ctx.get("data_source", "live")
@@ -63,7 +89,7 @@ def format_no_trigger(ctx: dict) -> str:
 
     stale_warn = ""
     if spot == 23500.0:
-        stale_warn = "\n\n⚠️ <b>Data warning:</b> Live fetch failed — values may be stale. Check GitHub Actions logs."
+        stale_warn = "\n\n⚠️ <b>Data warning:</b> Live fetch failed — values may be stale."
 
     return (
         f"📊 <b>Stonez Daily Scan</b>\n"
