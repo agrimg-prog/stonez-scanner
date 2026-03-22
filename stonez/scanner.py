@@ -198,6 +198,8 @@ class StonezScanner:
             "recent_high":    round(recent_high, 1),
             "recent_low":     round(recent_low, 1),
             "stonez_expiry":  stonez_expiry,
+            "data_source":    "yahoo_finance_live",
+            "scan_time":      datetime.now().strftime("%d-%b-%Y %I:%M %p IST"),
             "spot_df":        daily_df,
         }
 
