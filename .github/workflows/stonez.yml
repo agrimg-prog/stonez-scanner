@@ -1,20 +1,36 @@
-name: Stonez Daily Scan (free)
+name: Stonez Daily Scan
+
 on:
   schedule:
     - cron: "50 3 * * 1-5"   # 9:20 AM IST
     - cron: "55 9 * * 1-5"   # 3:25 PM IST
   workflow_dispatch:
+
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
+        with:
+          python-version: "3.11"
+          cache: "pip"
       - run: pip install -r requirements.txt
-      - name: Run scan
+
+      - name: Run scan and broadcast to all subscribers
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python3 run_scan.py
+
+      - name: Commit trade state
+        run: |
+          git config user.name "stonez-bot"
+          git config user.email "stonez-bot@github.com"
+          git add trade_state.json || true
+          git diff --staged --quiet || git commit -m "chore: trade state [skip ci]"
+          git push || true

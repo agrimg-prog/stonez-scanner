@@ -1,0 +1,43 @@
+name: Stonez Bot — Poll Messages
+
+on:
+  schedule:
+    # Every 5 minutes during market hours IST (3:30 AM – 10:30 AM UTC = 9 AM – 4 PM IST)
+    - cron: "*/5 3-10 * * 1-5"
+    # Also every 15 minutes outside market hours (for /trade commands anytime)
+    - cron: "*/15 0-3,10-23 * * *"
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pull latest (including updated subscribers.json and offset)
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - run: pip install -r requirements.txt
+
+      - name: Poll and handle bot messages
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 bot_handler.py
+
+      - name: Commit updated subscribers + offset
+        run: |
+          git config user.name "stonez-bot"
+          git config user.email "stonez-bot@github.com"
+          git add subscribers.json bot_offset.json || true
+          git diff --staged --quiet || git commit -m "bot: update subscribers/offset [skip ci]"
+          git push || true
