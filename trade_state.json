@@ -1,1 +1,20 @@
-{"status":"NONE","side":"","symbol":"","strike":0.0,"expiry":"","entry_price":0.0,"sl_price":0.0,"target_price":0.0,"spot_at_entry":0.0,"rsi_at_entry":0.0,"pattern":"","entered_at":"","last_checked":"","exit_price":0.0,"exit_reason":"","exited_at":"","pnl_pts":0.0,"pnl_rs":0.0}
+{
+  "status": "WATCHING",
+  "side": "CALL",
+  "symbol": "",
+  "strike": 0.0,
+  "expiry": "30APR2026",
+  "entry_price": 0.0,
+  "sl_price": 0.0,
+  "target_price": 0.0,
+  "spot_at_entry": 22912.4,
+  "rsi_at_entry": 33.9,
+  "pattern": "bullish_engulfing",
+  "entered_at": "2026-03-25T02:25:56.452577",
+  "last_checked": "2026-03-25T02:25:56.452587",
+  "exit_price": 0.0,
+  "exit_reason": "",
+  "exited_at": "",
+  "pnl_pts": 0.0,
+  "pnl_rs": 0.0
+}
