@@ -1,196 +1,128 @@
 """
-bot_handler.py
-Public Telegram bot — anyone who sends /start gets subscribed.
-Polls Telegram getUpdates every 5 minutes via GitHub Actions.
+bot_handler.py — polls Telegram for user commands and handles them.
+Runs every 5 min (market hours) via GitHub Actions.
 
-Commands:
-  /start   — subscribe to alerts
-  /stop    — unsubscribe
-  /trade   — run a live scan right now and reply
-  /status  — get current NIFTY market snapshot
-  /help    — show all commands
+Commands handled:
+  /start       → subscribe to signals
+  /stop        → unsubscribe
+  /trade       → live scan right now, reply to THIS user only
+  /status      → show current active trade state
+  /scan        → alias for /trade
+  /help        → command list
 
-Subscribers stored in subscribers.json (committed back to repo).
+Also handles plain text: "trade", "scan", "status"
 """
 
-import os
-import sys
-import json
-import logging
-import requests
-from datetime import datetime
+import os, json, logging, sys, requests
 from pathlib import Path
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s",
-                    handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+sys.path.insert(0, ".")
 
-TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN", "")
-API         = f"https://api.telegram.org/bot{TOKEN}"
-SUBS_FILE   = Path(__file__).parent / "subscribers.json"
-OFFSET_FILE = Path(__file__).parent / "bot_offset.json"
+BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+API_BASE    = f"https://api.telegram.org/bot{BOT_TOKEN}"
+SUBS_FILE   = Path("subscribers.json")
+OFFSET_FILE = Path("bot_offset.json")
 
 
-# ── Subscriber store ──────────────────────────────────────────────────────────
+# ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_subscribers() -> dict:
-    """
-    Returns dict: {chat_id_str: {name, username, joined_at}}
-    """
-    if not SUBS_FILE.exists():
-        return {}
-    try:
-        with open(SUBS_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    if SUBS_FILE.exists():
+        try:
+            return json.loads(SUBS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
 
 
 def save_subscribers(subs: dict):
-    with open(SUBS_FILE, "w") as f:
-        json.dump(subs, f, indent=2)
-    log.info(f"Subscribers saved: {len(subs)} total")
+    SUBS_FILE.write_text(json.dumps(subs, indent=2))
 
 
 def load_offset() -> int:
-    if not OFFSET_FILE.exists():
-        return 0
-    try:
-        with open(OFFSET_FILE) as f:
-            return json.load(f).get("offset", 0)
-    except Exception:
-        return 0
+    if OFFSET_FILE.exists():
+        try:
+            return int(json.loads(OFFSET_FILE.read_text()).get("offset", 0))
+        except Exception:
+            return 0
+    return 0
 
 
 def save_offset(offset: int):
-    with open(OFFSET_FILE, "w") as f:
-        json.dump({"offset": offset}, f)
+    OFFSET_FILE.write_text(json.dumps({"offset": offset, "updated": datetime.now().isoformat()}))
 
 
-# ── Telegram API helpers ──────────────────────────────────────────────────────
-
-def send_message(chat_id, text: str, parse_mode: str = "HTML"):
-    try:
-        r = requests.post(f"{API}/sendMessage",
-                          data={"chat_id": chat_id, "text": text,
-                                "parse_mode": parse_mode},
-                          timeout=10)
-        if not r.ok:
-            log.warning(f"Send to {chat_id} failed: {r.text[:100]}")
-    except Exception as e:
-        log.error(f"Send error to {chat_id}: {e}")
-
-
-def broadcast(text: str, subs: dict):
-    """Send message to all subscribers."""
-    dead = []
-    for chat_id in subs:
-        try:
-            r = requests.post(f"{API}/sendMessage",
-                              data={"chat_id": chat_id, "text": text,
-                                    "parse_mode": "HTML"},
-                              timeout=10)
-            if not r.ok:
-                err = r.json().get("description", "")
-                if any(x in err for x in ["blocked", "not found", "deactivated", "kicked"]):
-                    log.warning(f"Dead subscriber {chat_id}: {err}")
-                    dead.append(chat_id)
-        except Exception as e:
-            log.error(f"Broadcast error to {chat_id}: {e}")
-
-    # Auto-remove dead subscribers
-    for chat_id in dead:
-        subs.pop(chat_id, None)
-    if dead:
-        save_subscribers(subs)
-        log.info(f"Removed {len(dead)} dead subscriber(s)")
-
+# ── Telegram API ──────────────────────────────────────────────────────────────
 
 def get_updates(offset: int) -> list:
     try:
-        r = requests.get(f"{API}/getUpdates",
-                         params={"offset": offset, "timeout": 5, "limit": 100},
-                         timeout=15)
+        r = requests.get(
+            f"{API_BASE}/getUpdates",
+            params={"offset": offset, "timeout": 5, "limit": 100},
+            timeout=20,
+        )
         if r.ok:
             return r.json().get("result", [])
+        log.warning(f"getUpdates HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         log.error(f"getUpdates error: {e}")
     return []
 
 
+def send_one(chat_id: str, text: str):
+    """Send a message to one specific chat_id."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/sendMessage",
+            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=15,
+        )
+        if r.ok:
+            log.info(f"Replied to {chat_id}")
+        else:
+            log.warning(f"Reply to {chat_id} failed: {r.text[:150]}")
+    except Exception as e:
+        log.error(f"send_one {chat_id}: {e}")
+
+
 # ── Command handlers ──────────────────────────────────────────────────────────
 
-def handle_start(chat_id: str, user: dict, subs: dict):
-    name = user.get("first_name", "there")
-    if chat_id in subs:
-        send_message(chat_id,
-            f"👋 Hey {name}! You're already subscribed.\n\n"
-            f"You'll receive Stonez NIFTY signals automatically.\n"
-            f"Type /help to see all commands.")
-        return
-
+def handle_start(chat_id: str, user: str, subs: dict):
     subs[chat_id] = {
-        "name":      name,
-        "username":  user.get("username", ""),
-        "joined_at": datetime.now().isoformat(),
+        "name":   user,
+        "joined": datetime.now().isoformat(),
     }
-    save_subscribers(subs)
-    log.info(f"New subscriber: {name} ({chat_id})")
-
-    send_message(chat_id,
-        f"✅ <b>Welcome {name}! You're now subscribed to Stonez signals.</b>\n\n"
-        f"<b>What you'll receive:</b>\n"
-        f"• 🟢 CALL or 🔴 PUT signal when RSI hits extremes\n"
-        f"• 👀 Watchlist alerts when RSI is approaching\n"
-        f"• 📊 Daily market scan at 9:20 AM and 3:25 PM IST\n\n"
-        f"<b>Commands you can use anytime:</b>\n"
-        f"/trade — run a live scan right now\n"
-        f"/status — current NIFTY snapshot\n"
-        f"/stop — unsubscribe\n"
-        f"/help — show this message\n\n"
-        f"⚠️ This is for educational purposes. Always verify signals on Zerodha before trading."
+    send_one(chat_id,
+        f"👋 <b>Welcome to Stonez Bot, {user}!</b>\n\n"
+        f"You'll receive NIFTY monthly options signals based on the Stonez method.\n\n"
+        f"<b>Commands:</b>\n"
+        f"  /trade — Live market scan right now\n"
+        f"  /status — Current active trade\n"
+        f"  /stop — Unsubscribe from alerts\n"
+        f"  /help — This list\n\n"
+        f"📊 Stonez rule: Premium ₹70–100 | SL ~32 pts | Target 2×\n"
+        f"🔔 You are now subscribed to automated alerts."
     )
+    log.info(f"New subscriber: {chat_id} ({user})")
 
 
 def handle_stop(chat_id: str, subs: dict):
-    if chat_id in subs:
-        name = subs[chat_id].get("name", "")
-        subs.pop(chat_id)
-        save_subscribers(subs)
-        send_message(chat_id,
-            f"👋 You've been unsubscribed, {name}.\n"
-            f"Send /start anytime to subscribe again.")
-        log.info(f"Unsubscribed: {chat_id}")
-    else:
-        send_message(chat_id, "You're not subscribed. Send /start to subscribe.")
-
-
-def handle_help(chat_id: str):
-    send_message(chat_id,
-        f"<b>Stonez Signal Bot — Commands</b>\n\n"
-        f"/start — Subscribe to NIFTY signals\n"
-        f"/stop — Unsubscribe\n"
-        f"/trade — Run a live scan right now\n"
-        f"/status — Current NIFTY snapshot (RSI, VIX, trend)\n"
-        f"/help — Show this message\n\n"
-        f"<b>About this bot:</b>\n"
-        f"Scans NIFTY for Stonez strategy setups:\n"
-        f"• RSI daily + hourly extremes\n"
-        f"• Price action patterns (Doji, Engulfing, Hammer)\n"
-        f"• India VIX for volatility context\n"
-        f"• 20 SMA trend filter\n\n"
-        f"Automatic scans run at 9:20 AM and 3:25 PM IST on weekdays.\n\n"
-        f"⚠️ Educational only. Not financial advice."
+    subs.pop(chat_id, None)
+    send_one(chat_id,
+        "👋 You've been unsubscribed.\n"
+        "Send /start any time to resubscribe."
     )
+    log.info(f"Unsubscribed: {chat_id}")
 
 
 def handle_trade(chat_id: str):
-    """Run a live scan and send the result directly to this user."""
-    send_message(chat_id, "🔄 Running live scan... please wait.")
-
+    """Run a live scan and reply to this user only."""
+    send_one(chat_id, "🔍 Running live Stonez scan… please wait a moment.")
     try:
-        from stonez.scanner  import StonezScanner, SignalStrength
+        from stonez.scanner import StonezScanner
         from stonez.notifier import format_trigger, format_watchlist, format_no_trigger
 
         scanner = StonezScanner()
@@ -199,112 +131,136 @@ def handle_trade(chat_id: str):
 
         if result.triggers:
             for t in result.triggers:
-                from stonez.notifier import format_trigger
-                send_message(chat_id, format_trigger(t))
+                send_one(chat_id, format_trigger(t))
         elif result.watchlist:
-            send_message(chat_id, format_watchlist(result.watchlist, ctx))
+            send_one(chat_id, format_watchlist(result.watchlist, {
+                **ctx,
+                "scan_time": datetime.now().strftime("%d-%b-%Y %I:%M %p IST"),
+            }))
         else:
-            send_message(chat_id, format_no_trigger(ctx))
+            send_one(chat_id, format_no_trigger({
+                **ctx,
+                "scan_time": datetime.now().strftime("%d-%b-%Y %I:%M %p IST"),
+            }))
 
     except Exception as e:
-        log.error(f"/trade error: {e}", exc_info=True)
-        send_message(chat_id,
-            f"❌ Scan failed: {str(e)[:200]}\n"
-            f"Try again in a few minutes.")
+        log.error(f"handle_trade error: {e}", exc_info=True)
+        send_one(chat_id, f"⚠️ Scan failed: {e}\nCheck GitHub Actions logs.")
 
 
 def handle_status(chat_id: str):
-    """Send current market snapshot."""
+    """Reply with current trade_state."""
     try:
-        from stonez.scanner import StonezScanner
-        scanner = StonezScanner()
-        ctx     = scanner.get_market_context()
+        from stonez.trade_state import load_state
+        s = load_state()
 
-        cond  = ctx.get("condition","").upper().replace("_"," ")
-        trend = ctx.get("trend","").upper()
+        if s.status == "NONE":
+            send_one(chat_id,
+                "📭 <b>No active trade.</b>\n"
+                "Use /trade to run a live scan."
+            )
+            return
 
-        # Condition emoji
-        cond_icon = {
-            "OVERSOLD EXTREME": "🔥",
-            "OVERSOLD":         "🟢",
-            "NEAR OVERSOLD":    "🟡",
-            "OVERBOUGHT EXTREME":"🔥",
-            "OVERBOUGHT":       "🔴",
-            "NEAR OVERBOUGHT":  "🟡",
-        }.get(cond, "⚪")
-
-        send_message(chat_id,
-            f"📊 <b>NIFTY Live Snapshot</b>\n"
+        icon = "🟢" if s.side == "CALL" else "🔴"
+        msg = (
+            f"{icon} <b>Trade Status: {s.status}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Spot:</b> {ctx.get('spot',0):,.1f}\n"
-            f"<b>India VIX:</b> {ctx.get('india_vix',0)}%\n"
-            f"<b>Daily RSI:</b> {ctx.get('rsi_daily',0)}\n"
-            f"<b>Hourly RSI:</b> {ctx.get('rsi_hourly',0)}\n"
-            f"<b>20 SMA:</b> {ctx.get('sma_20',0):,.0f}\n"
-            f"<b>Trend:</b> {trend}\n"
-            f"<b>Condition:</b> {cond_icon} {cond}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Data: Yahoo Finance — real time</i>\n"
-            f"<b>As of:</b> {ctx.get('scan_time','')}"
+            f"<b>Side:</b>   {s.side}\n"
+            f"<b>Strike:</b> {int(s.strike)}\n"
+            f"<b>Expiry:</b> {s.expiry}\n"
+            f"<b>Entry:</b>  ₹{s.entry_price}\n"
+            f"<b>SL:</b>     ₹{s.sl_price} "
+            f"({s.entry_price - s.sl_price:.0f} pts below)\n"
+            f"<b>Target:</b> ₹{s.target_price} (2×)\n"
+            f"<b>Opened:</b> {s.entered_at[:16].replace('T',' ')}\n"
         )
+        if s.status in ("SL_HIT", "TARGET_HIT", "EXITED"):
+            msg += (
+                f"\n<b>Exit:</b>  ₹{s.exit_price} ({s.exit_reason})\n"
+                f"<b>P&L:</b>  {s.pnl_pts:+.1f} pts  |  ₹{s.pnl_rs:+.0f}\n"
+            )
+        send_one(chat_id, msg)
+
     except Exception as e:
-        log.error(f"/status error: {e}")
-        send_message(chat_id, f"❌ Could not fetch market data: {str(e)[:200]}")
+        log.error(f"handle_status: {e}")
+        send_one(chat_id, f"⚠️ Error loading trade state: {e}")
 
 
-# ── Main polling loop ─────────────────────────────────────────────────────────
+def handle_help(chat_id: str):
+    send_one(chat_id,
+        "<b>Stonez Bot Commands</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "/trade  — Live NIFTY scan right now\n"
+        "/status — Active trade info\n"
+        "/start  — Subscribe to alerts\n"
+        "/stop   — Unsubscribe\n"
+        "/help   — This message\n\n"
+        "You can also just type: <code>trade</code> or <code>status</code>"
+    )
 
-def process_updates():
-    if not TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN not set.")
-        return
 
-    subs   = load_subscribers()
-    offset = load_offset()
+# ── Update dispatcher ─────────────────────────────────────────────────────────
 
-    log.info(f"Polling for updates. Offset: {offset} | Subscribers: {len(subs)}")
+def process_update(update: dict, subs: dict):
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return  # callback_query etc — ignore
 
+    chat_id = str(msg["chat"]["id"])
+    raw     = msg.get("text", "").strip()
+    user    = msg.get("from", {}).get("first_name", "Trader")
+    cmd     = raw.lower().split()[0] if raw else ""
+
+    log.info(f"Update from {chat_id} ({user}): {raw!r}")
+
+    if cmd in ("/start", "start"):
+        handle_start(chat_id, user, subs)
+
+    elif cmd in ("/stop", "stop"):
+        handle_stop(chat_id, subs)
+
+    elif cmd in ("/trade", "trade", "/scan", "scan"):
+        handle_trade(chat_id)
+
+    elif cmd in ("/status", "status"):
+        handle_status(chat_id)
+
+    elif cmd in ("/help", "help"):
+        handle_help(chat_id)
+
+    else:
+        # Unknown message — give a hint
+        send_one(chat_id,
+            "Type /trade for a live scan, /status for trade info, or /help for commands."
+        )
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    if not BOT_TOKEN:
+        log.error("TELEGRAM_BOT_TOKEN not set in environment.")
+        sys.exit(1)
+
+    subs    = load_subscribers()
+    offset  = load_offset()
     updates = get_updates(offset)
 
-    if not updates:
-        log.info("No new updates.")
-        return
+    log.info(f"Fetched {len(updates)} update(s). Current offset={offset}. "
+             f"Subscribers={len(subs)}")
 
-    new_offset = offset
     for update in updates:
-        new_offset = max(new_offset, update["update_id"] + 1)
+        try:
+            process_update(update, subs)
+        except Exception as e:
+            log.error(f"process_update error: {e}", exc_info=True)
+        finally:
+            offset = update["update_id"] + 1  # always advance offset
 
-        msg = update.get("message") or update.get("edited_message")
-        if not msg:
-            continue
-
-        chat_id = str(msg["chat"]["id"])
-        user    = msg.get("from", {})
-        text    = msg.get("text", "").strip().lower()
-
-        log.info(f"Message from {chat_id} ({user.get('first_name','')}): {text[:50]}")
-
-        # Route commands
-        if text.startswith("/start"):
-            handle_start(chat_id, user, subs)
-        elif text.startswith("/stop"):
-            handle_stop(chat_id, subs)
-        elif text.startswith("/trade") or text == "trade":
-            handle_trade(chat_id)
-        elif text.startswith("/status") or text == "status":
-            handle_status(chat_id)
-        elif text.startswith("/help"):
-            handle_help(chat_id)
-        else:
-            # Unknown message — if not subscribed, nudge them
-            if chat_id not in subs:
-                send_message(chat_id,
-                    "👋 Send /start to subscribe to NIFTY Stonez signals.\n"
-                    "Or /help to see all commands.")
-
-    save_offset(new_offset)
-    log.info(f"Processed {len(updates)} update(s). New offset: {new_offset}")
+    save_subscribers(subs)
+    save_offset(offset)
+    log.info(f"Done. New offset={offset}")
 
 
 if __name__ == "__main__":
-    process_updates()
+    main()
