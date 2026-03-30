@@ -1,5 +1,5 @@
 {
-  "status": "WATCHING",
+  "status": "TARGET_HIT",
   "side": "CALL",
   "symbol": "",
   "strike": 0.0,
@@ -11,10 +11,10 @@
   "rsi_at_entry": 33.9,
   "pattern": "bullish_engulfing",
   "entered_at": "2026-03-25T02:25:56.452577",
-  "last_checked": "2026-03-25T02:25:56.452587",
-  "exit_price": 0.0,
-  "exit_reason": "",
-  "exited_at": "",
-  "pnl_pts": 0.0,
-  "pnl_rs": 0.0
+  "last_checked": "2026-03-30T09:59:51.890111",
+  "exit_price": 22376.35,
+  "exit_reason": "TARGET_HIT",
+  "exited_at": "2026-03-30T09:59:51.890230",
+  "pnl_pts": 22376.3,
+  "pnl_rs": 1678222.0
 }
